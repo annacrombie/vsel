@@ -45,10 +45,10 @@ fn starting_point(sel: usize, height: usize, length: usize) -> (usize, usize) {
         };
 
     let start =
-       if end < height - 1 {
+       if end < (height + 1) {
            0
        } else {
-         end - height - 1
+         end - (height + 1)
        };
 
     (start, end)
@@ -92,10 +92,10 @@ fn display_list(list: &Vec<String>, selected: usize, height: usize, stdout: &mut
     stdout.flush().unwrap();
 }
 
-fn grab_stdin(stdin: Stdin, width: u16) -> Vec<String> {
+fn grab_stdin(stdin: Stdin, width: usize) -> Vec<String> {
     stdin.lock()
          .lines()
-         .map(|l| trim_string(l.unwrap(), width as usize))
+         .map(|l| trim_string(l.unwrap(), width))
          .collect()
 }
 
@@ -174,25 +174,28 @@ fn main() -> Result<(), std::io::Error> {
     let stdin = io::stdin();
 
     let (width, height) = termion::terminal_size().unwrap();
-    let height = height / 2;
+    let (width, height) = (width as usize, height as usize);
 
     let lines = grab_stdin(stdin, width);
 
+    let height = if height / 2 > lines.len() { lines.len() } else { height / 2 };
+
     if lines.len() <= 0 {
-        return Err(io::Error::new(io::ErrorKind::Other, "empty input"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty input"));
     };
 
     let mut tty = File::open("/dev/tty").unwrap();
 
     print!("\x1b[?25l");
-    clear_display(height as usize);
+    clear_display(height);
     let cooked = uncook_tty(tty.as_raw_fd());
 
-    let selection = select_loop(&mut tty, height as usize, lines);
+    let selection = select_loop(&mut tty, height, lines);
 
     term::tcsetattr(tty.as_raw_fd(), term::TCSANOW, &cooked).unwrap();
-    clear_display(height as usize);
-    print!("\x1b[?25h\x1b[K");
+    clear_display(height);
+
+    print!("\x1b[?25h\x1b[1A\x1b[K");
 
     let command_parts: Vec<String> = opts.values_of("command")
                                          .unwrap()
