@@ -168,7 +168,7 @@ fn parse_options() -> ArgMatches<'static> {
         .get_matches()
 }
 
-fn main() {
+fn main() -> Result<(), std::io::Error> {
     let opts = parse_options();
 
     let stdin = io::stdin();
@@ -177,6 +177,10 @@ fn main() {
     let height = height / 2;
 
     let lines = grab_stdin(stdin, width);
+
+    if lines.len() <= 0 {
+        return Err(io::Error::new(io::ErrorKind::Other, "empty input"));
+    };
 
     let mut tty = File::open("/dev/tty").unwrap();
 
@@ -188,7 +192,7 @@ fn main() {
 
     term::tcsetattr(tty.as_raw_fd(), term::TCSANOW, &cooked).unwrap();
     clear_display(height as usize);
-    print!("\x1b[?25h");
+    print!("\x1b[?25h\x1b[K");
 
     let command_parts: Vec<String> = opts.values_of("command")
                                          .unwrap()
@@ -198,16 +202,20 @@ fn main() {
     let (head, args) = command_parts.split_at(1);
     let cmd_path = head.first().unwrap();
 
-    print!("\x1b[K");
-
     match selection {
         Some(val) => {
-            Command::new(cmd_path)
-                    .args(args)
-                    .arg(val)
-                    .status()
-                    .unwrap();
+            match Command::new(cmd_path)
+                          .args(args)
+                          .arg(val)
+                          .status().unwrap().code() {
+
+                None => Err(io::Error::new(io::ErrorKind::Other, "command killed by signal")), // the command was killed by a signal
+                Some(code) => match code {
+                    0 => Ok(()),
+                    _ => Err(io::Error::from_raw_os_error(code))
+                }
+            }
         },
-        None => {}
+        None => Err(io::Error::new(io::ErrorKind::Other, "nothing selected"))
     }
 }
