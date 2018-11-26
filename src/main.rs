@@ -1,0 +1,213 @@
+extern crate termios as term;
+extern crate unicode_width;
+extern crate clap;
+extern crate termion;
+
+use unicode_width::{UnicodeWidthChar};
+use clap::{Arg, App, AppSettings, ArgMatches};
+
+use std::io::{self, Read, Write, BufRead, Stdin};
+use std::fs::File;
+use std::process::{Command};
+use std::os::unix::io::AsRawFd;
+
+fn trim_string(string: String, tgt: usize) -> String {
+    let mut w = 0;
+
+    let mut result = "".to_string();
+
+    for c in string.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(1);
+
+        if w + cw > tgt { break; };
+
+        w = w + cw;
+        result.push(c);
+    }
+
+    result
+}
+
+fn starting_point(sel: usize, height: usize, length: usize) -> (usize, usize) {
+    let end =
+        if length > height {
+            let buffer = height / 2;
+
+            if sel + buffer >= length {
+                length
+            } else if sel + buffer > height {
+                sel + 1 + buffer
+            } else {
+                height + 1
+            }
+        } else {
+            length
+        };
+
+    let start =
+       if end < height - 1 {
+           0
+       } else {
+         end - height - 1
+       };
+
+    (start, end)
+}
+
+fn display_list(list: &Vec<String>, selected: usize, height: usize, stdout: &mut io::StdoutLock) {
+    let (start, end) = starting_point(selected, height, list.len());
+
+    let mut drew = start;
+
+    for s in list[start..end].iter() {
+        //println!("{:?} ", s);
+        let color =
+            if drew == selected {
+                "\x1b[1m\x1b[34m"
+            } else {
+                "\x1b[0m"
+            };
+
+
+        let line_length = s.len();
+
+        stdout.write_fmt(
+            format_args!("{}{}\x1b[0m\x1b[K\x1b[1B\x1b[{}D", color, s, line_length)
+        ).unwrap();
+
+
+        drew = drew + 1;
+    }
+
+    let s = format!("{:3}/{:3}, {:3}%",
+                    selected + 1, list.len(), ((selected + 1) * 100) / list.len());
+
+    let line_length = s.len();
+
+    stdout.write_fmt(
+        format_args!("{}\x1b[0m\x1b[K\x1b[1B\x1b[{}D", s, line_length)
+    ).unwrap();
+
+    stdout.write_fmt(format_args!("\x1b[{}A", (drew - start) + 1)).unwrap();
+    stdout.flush().unwrap();
+}
+
+fn grab_stdin(stdin: Stdin, width: u16) -> Vec<String> {
+    stdin.lock()
+         .lines()
+         .map(|l| trim_string(l.unwrap(), width as usize))
+         .collect()
+}
+
+fn uncook_tty(fd: i32) -> term::Termios {
+    let mut termios = term::Termios::from_fd(fd).unwrap();
+    let old_termios = termios.clone();
+    term::cfmakeraw(&mut termios);
+    term::tcsetattr(fd, term::TCSANOW, &termios).unwrap();
+
+    old_termios
+}
+
+fn clear_display(len: usize) {
+    for _ in 0..(len+2) { println!("\x1b[K"); }
+    print!("\x1b[{}A", len + 2);
+}
+
+fn select_loop(tty: &mut File, height: usize, lines: Vec<String>) -> Option<String> {
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    let mut buf = [0;1];
+
+    let list_length = lines.len();
+    let mut selected: usize = 0;
+
+    loop {
+        display_list(&lines, selected, height, &mut writer);
+        writer.flush().unwrap();
+
+        tty.read_exact(&mut buf[..]).unwrap();
+
+        match buf[0] {
+            b'q' => { return None; },
+            b'k' | b'A' | b'h' | b'C' => {
+                selected =
+                    if selected > 0 {
+                        selected - 1
+                    } else {
+                        list_length - 1
+                    };
+            },
+            b'j' | b'B' | b'l' | b'D' => {
+                selected =
+                    if selected < list_length - 1 {
+                        selected + 1
+                    } else {
+                        0
+                    };
+            },
+            b'g' => { selected = 0; },
+            b'G' => { selected = list_length - 1; },
+            b'z' => { selected = list_length / 2; },
+            13 => { break; },
+            _ => {}
+        }
+    }
+
+    Some(lines[selected].to_string())
+}
+
+fn parse_options() -> ArgMatches<'static> {
+    App::new("Visual SELect")
+        .version("0.1.0")
+        .author("Stone Tickle")
+        .about("select a line from stdin and execute the specified command")
+        .setting(AppSettings::TrailingVarArg)
+        .arg(Arg::with_name("command")
+             .required(true)
+             .multiple(true))
+        .get_matches()
+}
+
+fn main() {
+    let opts = parse_options();
+
+    let stdin = io::stdin();
+
+    let (width, height) = termion::terminal_size().unwrap();
+    let height = height / 2;
+
+    let lines = grab_stdin(stdin, width);
+
+    let mut tty = File::open("/dev/tty").unwrap();
+
+    print!("\x1b[?25l");
+    clear_display(height as usize);
+    let cooked = uncook_tty(tty.as_raw_fd());
+
+    let selection = select_loop(&mut tty, height as usize, lines);
+
+    term::tcsetattr(tty.as_raw_fd(), term::TCSANOW, &cooked).unwrap();
+    clear_display(height as usize);
+    print!("\x1b[?25h");
+
+    let command_parts: Vec<String> = opts.values_of("command")
+                                         .unwrap()
+                                         .map(|v| v.to_string())
+                                         .collect();
+
+    let (head, args) = command_parts.split_at(1);
+    let cmd_path = head.first().unwrap();
+
+    print!("\x1b[K");
+
+    match selection {
+        Some(val) => {
+            Command::new(cmd_path)
+                    .args(args)
+                    .arg(val)
+                    .status()
+                    .unwrap();
+        },
+        None => {}
+    }
+}

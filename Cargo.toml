@@ -1,0 +1,10 @@
+[package]
+name = "vsel"
+version = "0.1.0"
+authors = ["Stone Tickle <lattis@mochiro.moe>"]
+
+[dependencies]
+termios = "*"
+clap = "2"
+unicode-width = "0.1.5"
+termion = "1.5.1"
