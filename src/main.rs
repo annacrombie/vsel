@@ -54,7 +54,13 @@ fn starting_point(sel: usize, height: usize, length: usize) -> (usize, usize) {
     (start, end)
 }
 
-fn display_list(list: &Vec<String>, selected: usize, height: usize, stdout: &mut io::StdoutLock) {
+fn display_list(list: &Vec<String>, selected: usize, height: usize, width: usize, stdout: &mut io::StdoutLock) {
+    let my_list =
+        list.into_iter()
+            .map(|l| trim_string(l.to_string(), width))
+            .collect::<Vec<String>>();
+    let list = &my_list;
+
     let (start, end) = starting_point(selected, height, list.len());
 
     let mut drew = start;
@@ -92,10 +98,10 @@ fn display_list(list: &Vec<String>, selected: usize, height: usize, stdout: &mut
     stdout.flush().unwrap();
 }
 
-fn grab_stdin(stdin: Stdin, width: usize) -> Vec<String> {
+fn grab_stdin(stdin: Stdin) -> Vec<String> {
     stdin.lock()
          .lines()
-         .map(|l| trim_string(l.unwrap(), width))
+         .map(|l| l.unwrap())
          .collect()
 }
 
@@ -113,7 +119,7 @@ fn clear_display(len: usize) {
     print!("\x1b[{}A", len + 2);
 }
 
-fn select_loop(tty: &mut File, height: usize, lines: Vec<String>) -> Option<String> {
+fn select_loop(tty: &mut File, height: usize, width: usize, lines: Vec<String>) -> Option<String> {
     let stdout = io::stdout();
     let mut writer = stdout.lock();
     let mut buf = [0;1];
@@ -122,7 +128,7 @@ fn select_loop(tty: &mut File, height: usize, lines: Vec<String>) -> Option<Stri
     let mut selected: usize = 0;
 
     loop {
-        display_list(&lines, selected, height, &mut writer);
+        display_list(&lines, selected, height, width, &mut writer);
         writer.flush().unwrap();
 
         tty.read_exact(&mut buf[..]).unwrap();
@@ -176,7 +182,7 @@ fn main() -> Result<(), std::io::Error> {
     let (width, height) = termion::terminal_size().unwrap();
     let (width, height) = (width as usize, height as usize);
 
-    let lines = grab_stdin(stdin, width);
+    let lines = grab_stdin(stdin);
 
     let height = if height / 2 > lines.len() { lines.len() } else { height / 2 };
 
@@ -190,7 +196,7 @@ fn main() -> Result<(), std::io::Error> {
     clear_display(height);
     let cooked = uncook_tty(tty.as_raw_fd());
 
-    let selection = select_loop(&mut tty, height, lines);
+    let selection = select_loop(&mut tty, height, width, lines);
 
     term::tcsetattr(tty.as_raw_fd(), term::TCSANOW, &cooked).unwrap();
     clear_display(height);
