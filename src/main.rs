@@ -119,22 +119,22 @@ fn clear_display(len: usize) {
     print!("\x1b[{}A", len + 2);
 }
 
-fn select_loop(tty: &mut File, height: usize, width: usize, lines: Vec<String>) -> Option<String> {
+fn select_loop(tty: &mut File, start: usize, height: usize, width: usize, lines: &Vec<String>) -> (Option<String>, Option<usize>) {
     let stdout = io::stdout();
     let mut writer = stdout.lock();
     let mut buf = [0;1];
 
     let list_length = lines.len();
-    let mut selected: usize = 0;
+    let mut selected: usize = start;
 
     loop {
-        display_list(&lines, selected, height, width, &mut writer);
+        display_list(lines, selected, height, width, &mut writer);
         writer.flush().unwrap();
 
         tty.read_exact(&mut buf[..]).unwrap();
 
         match buf[0] {
-            b'q' => { return None; },
+            b'q' => { return (None, None); },
             b'k' | b'A' | b'h' | b'C' => {
                 selected =
                     if selected > 0 {
@@ -159,7 +159,7 @@ fn select_loop(tty: &mut File, height: usize, width: usize, lines: Vec<String>) 
         }
     }
 
-    Some(lines[selected].to_string())
+    (Some(lines[selected].to_string()), Some(selected))
 }
 
 fn parse_options() -> ArgMatches<'static> {
@@ -192,17 +192,6 @@ fn main() -> Result<(), std::io::Error> {
 
     let mut tty = File::open("/dev/tty").unwrap();
 
-    print!("\x1b[?25l");
-    clear_display(height);
-    let cooked = uncook_tty(tty.as_raw_fd());
-
-    let selection = select_loop(&mut tty, height, width, lines);
-
-    term::tcsetattr(tty.as_raw_fd(), term::TCSANOW, &cooked).unwrap();
-    clear_display(height);
-
-    print!("\x1b[?25h\x1b[1A\x1b[K");
-
     let command_parts: Vec<String> = opts.values_of("command")
                                          .unwrap()
                                          .map(|v| v.to_string())
@@ -211,20 +200,46 @@ fn main() -> Result<(), std::io::Error> {
     let (head, args) = command_parts.split_at(1);
     let cmd_path = head.first().unwrap();
 
-    match selection {
-        Some(val) => {
-            match Command::new(cmd_path)
-                          .args(args)
-                          .arg(val)
-                          .status().unwrap().code() {
 
-                None => Err(io::Error::new(io::ErrorKind::Other, "command killed by signal")), // the command was killed by a signal
-                Some(code) => match code {
-                    0 => Ok(()),
-                    _ => Err(io::Error::from_raw_os_error(code))
+    print!("\x1b[?25l");
+    clear_display(height);
+    let cooked = uncook_tty(tty.as_raw_fd());
+
+    let mut rresult = Ok(());
+    let mut result_ok = true;
+    let mut start = 0;
+    while result_ok {
+        let (selection, id) = select_loop(&mut tty, start, height, width, &lines);
+        rresult = match selection {
+            Some(val) => {
+                match Command::new(cmd_path)
+                              .args(args)
+                              .arg(val)
+                              .status().unwrap().code() {
+
+                    None => Err(io::Error::new(io::ErrorKind::Other, "command killed by signal")), // the command was killed by a signal,
+                    Some(code) => match code {
+                        0 => Ok(()),
+                        _ => Err(io::Error::from_raw_os_error(code))
+                    }
                 }
+            },
+            None => Err(io::Error::new(io::ErrorKind::Other, "nothing selected"))
+        };
+
+        match rresult {
+            Ok(_) => {
+                start = id.unwrap();
+            },
+            Err(_) => {
+                result_ok = false;
             }
-        },
-        None => Err(io::Error::new(io::ErrorKind::Other, "nothing selected"))
+        }
     }
+
+    term::tcsetattr(tty.as_raw_fd(), term::TCSANOW, &cooked).unwrap();
+    clear_display(height);
+
+    print!("\x1b[?25h\x1b[1A\x1b[K");
+    return rresult;
 }
