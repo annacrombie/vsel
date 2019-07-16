@@ -9,7 +9,150 @@ use unicode_width::UnicodeWidthChar;
 use std::fs::File;
 use std::io::{self, BufRead, Read, Stdin, Write};
 use std::os::unix::io::AsRawFd;
-use std::process::Command;
+use std::process::{exit, Command};
+
+struct TermDim {
+    height: usize,
+    width: usize,
+}
+
+impl TermDim {
+    fn new() -> TermDim {
+        let (width, height) = termion::terminal_size().unwrap();
+
+        TermDim {
+            width: width as usize,
+            height: height as usize,
+        }
+    }
+
+    fn civis(&self) {
+        print!("\x1b[?25l");
+    }
+
+    fn cnorm(&self) {
+        print!("\x1b[?25h");
+    }
+
+    fn clear(&self) {
+        for _ in 0..(self.height + 2) {
+            println!("\x1b[K");
+        }
+        print!("\x1b[{}A", self.height + 2);
+    }
+}
+
+struct ViList {
+    list: Vec<String>,
+    len: usize,
+    selected: usize,
+    height: usize,
+    width: usize,
+}
+
+fn write_line<'t>(stdout: &mut io::StdoutLock, color: &'t str, line: &'t str) {
+    stdout
+        .write_fmt(format_args!(
+            "{}{}\x1b[0m\x1b[K\x1b[1B\x1b[{}D",
+            color,
+            line,
+            line.len()
+        ))
+        .unwrap();
+}
+
+impl ViList {
+    fn build(stdin: Stdin, dim: &TermDim) -> ViList {
+        let list: Vec<String> = stdin.lock().lines().map(|l| l.unwrap()).collect();
+        let len = list.len();
+
+        let height = if dim.height / 2 > len {
+            len
+        } else {
+            dim.height / 2
+        };
+
+        ViList {
+            height,
+            len,
+            list,
+            selected: 0,
+            width: dim.width,
+        }
+    }
+
+    fn trim_list(&self) -> Vec<String> {
+        self.list
+            .iter()
+            .map(|l| trim_string(l.to_string(), self.width))
+            .collect::<Vec<String>>()
+    }
+
+    fn start_point(&self) -> (usize, usize) {
+        let end = if self.len > self.height {
+            let buffer = self.height / 2;
+
+            if self.selected + buffer >= self.len {
+                self.len
+            } else if self.selected + buffer > self.height {
+                self.selected + 1 + buffer
+            } else {
+                self.height + 1
+            }
+        } else {
+            self.len
+        };
+
+        let start = if end < (self.height + 1) {
+            0
+        } else {
+            end - (self.height + 1)
+        };
+
+        (start, end)
+    }
+
+    fn pct_str(&self) -> String {
+        format!(
+            "{:3}/{:3}, {:3}%",
+            self.selected + 1,
+            self.len,
+            ((self.selected + 1) * 100) / self.len
+        )
+    }
+
+    fn display(&self, stdout: &mut io::StdoutLock) {
+        let list = self.trim_list();
+
+        let (start, end) = self.start_point();
+
+        let mut drew = start;
+
+        for line in list[start..end].iter() {
+            let color = if drew == self.selected {
+                "\x1b[1m\x1b[34m"
+            } else {
+                "\x1b[0m"
+            };
+
+            write_line(stdout, color, line);
+
+            drew += 1;
+        }
+
+        write_line(stdout, "0", &self.pct_str());
+
+        stdout
+            .write_fmt(format_args!("\x1b[{}A", (end - start) + 1))
+            .unwrap();
+
+        stdout.flush().unwrap();
+    }
+
+    fn selected(&self) -> String {
+        self.list[self.selected].to_string()
+    }
+}
 
 fn trim_string(string: String, tgt: usize) -> String {
     let mut w = 0;
@@ -23,162 +166,58 @@ fn trim_string(string: String, tgt: usize) -> String {
             break;
         };
 
-        w = w + cw;
+        w += cw;
         result.push(c);
     }
 
     result
 }
 
-fn starting_point(sel: usize, height: usize, length: usize) -> (usize, usize) {
-    let end = if length > height {
-        let buffer = height / 2;
-
-        if sel + buffer >= length {
-            length
-        } else if sel + buffer > height {
-            sel + 1 + buffer
-        } else {
-            height + 1
-        }
-    } else {
-        length
-    };
-
-    let start = if end < (height + 1) {
-        0
-    } else {
-        end - (height + 1)
-    };
-
-    (start, end)
-}
-
-fn display_list(
-    list: &Vec<String>,
-    selected: usize,
-    height: usize,
-    width: usize,
-    stdout: &mut io::StdoutLock,
-) {
-    let my_list = list
-        .into_iter()
-        .map(|l| trim_string(l.to_string(), width))
-        .collect::<Vec<String>>();
-    let list = &my_list;
-
-    let (start, end) = starting_point(selected, height, list.len());
-
-    let mut drew = start;
-
-    for s in list[start..end].iter() {
-        //println!("{:?} ", s);
-        let color = if drew == selected {
-            "\x1b[1m\x1b[34m"
-        } else {
-            "\x1b[0m"
-        };
-
-        let line_length = s.len();
-
-        stdout
-            .write_fmt(format_args!(
-                "{}{}\x1b[0m\x1b[K\x1b[1B\x1b[{}D",
-                color, s, line_length
-            ))
-            .unwrap();
-
-        drew = drew + 1;
-    }
-
-    let s = format!(
-        "{:3}/{:3}, {:3}%",
-        selected + 1,
-        list.len(),
-        ((selected + 1) * 100) / list.len()
-    );
-
-    let line_length = s.len();
-
-    stdout
-        .write_fmt(format_args!(
-            "{}\x1b[0m\x1b[K\x1b[1B\x1b[{}D",
-            s, line_length
-        ))
-        .unwrap();
-
-    stdout
-        .write_fmt(format_args!("\x1b[{}A", (drew - start) + 1))
-        .unwrap();
-    stdout.flush().unwrap();
-}
-
-fn grab_stdin(stdin: Stdin) -> Vec<String> {
-    stdin.lock().lines().map(|l| l.unwrap()).collect()
-}
-
 fn uncook_tty(fd: i32) -> term::Termios {
     let mut termios = term::Termios::from_fd(fd).unwrap();
-    let old_termios = termios.clone();
+    let old_termios = termios;
     term::cfmakeraw(&mut termios);
     term::tcsetattr(fd, term::TCSANOW, &termios).unwrap();
 
     old_termios
 }
 
-fn clear_display(len: usize) {
-    for _ in 0..(len + 2) {
-        println!("\x1b[K");
-    }
-    print!("\x1b[{}A", len + 2);
-}
-
-fn select_loop(
-    tty: &mut File,
-    start: usize,
-    height: usize,
-    width: usize,
-    lines: &Vec<String>,
-) -> (Option<String>, Option<usize>) {
+fn select_loop(tty: &mut File, list: &mut ViList) -> bool {
     let stdout = io::stdout();
     let mut writer = stdout.lock();
     let mut buf = [0; 1];
 
-    let list_length = lines.len();
-    let mut selected: usize = start;
-
     loop {
-        display_list(lines, selected, height, width, &mut writer);
-        writer.flush().unwrap();
+        list.display(&mut writer);
 
         tty.read_exact(&mut buf[..]).unwrap();
 
         match buf[0] {
             b'q' => {
-                return (None, None);
+                return false;
             }
             b'k' | b'A' | b'h' | b'C' => {
-                selected = if selected > 0 {
-                    selected - 1
+                list.selected = if list.selected > 0 {
+                    list.selected - 1
                 } else {
-                    list_length - 1
+                    list.len - 1
                 };
             }
             b'j' | b'B' | b'l' | b'D' => {
-                selected = if selected < list_length - 1 {
-                    selected + 1
+                list.selected = if list.selected < list.len - 1 {
+                    list.selected + 1
                 } else {
                     0
                 };
             }
             b'g' => {
-                selected = 0;
+                list.selected = 0;
             }
             b'G' => {
-                selected = list_length - 1;
+                list.selected = list.len - 1;
             }
             b'z' => {
-                selected = list_length / 2;
+                list.selected = list.len / 2;
             }
             13 => {
                 break;
@@ -187,7 +226,7 @@ fn select_loop(
         }
     }
 
-    (Some(lines[selected].to_string()), Some(selected))
+    true
 }
 
 fn parse_options() -> ArgMatches<'static> {
@@ -197,84 +236,77 @@ fn parse_options() -> ArgMatches<'static> {
         .about("select a line from stdin and execute the specified command")
         .setting(AppSettings::TrailingVarArg)
         .arg(Arg::with_name("command").required(true).multiple(true))
+        .arg(
+            Arg::with_name("multi")
+                .short("m")
+                .help("enables multiple selections"),
+        )
         .get_matches()
 }
 
-fn main() -> Result<(), std::io::Error> {
+struct Cmd {
+    path: String,
+    args: Vec<String>,
+}
+
+impl Cmd {
+    fn parse(parts: clap::Values) -> Cmd {
+        let parts: Vec<String> = parts.map(|v| v.to_string()).collect();
+
+        let (head, args) = parts.split_at(1);
+        let path = head.first().unwrap().to_string();
+        let args = args.iter().map(|v| v.to_string()).collect();
+
+        Cmd { path, args }
+    }
+
+    fn exec(&self, value: &str) -> Option<i32> {
+        Command::new(&self.path)
+            .args(&self.args)
+            .arg(value)
+            .status()
+            .unwrap()
+            .code()
+    }
+}
+
+fn main() {
     let opts = parse_options();
+    let cmd = Cmd::parse(opts.values_of("command").unwrap());
 
-    let stdin = io::stdin();
+    let win = TermDim::new();
+    let mut list = ViList::build(io::stdin(), &win);
 
-    let (width, height) = termion::terminal_size().unwrap();
-    let (width, height) = (width as usize, height as usize);
-
-    let lines = grab_stdin(stdin);
-
-    let height = if height / 2 > lines.len() {
-        lines.len()
-    } else {
-        height / 2
+    if list.len == 0 {
+        exit(1);
     };
 
-    if lines.len() <= 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty input"));
-    };
+    let mut stdin = File::open("/dev/tty").unwrap();
+    win.clear();
+    win.civis();
+    let cooked = uncook_tty(stdin.as_raw_fd());
 
-    let mut tty = File::open("/dev/tty").unwrap();
-
-    let command_parts: Vec<String> = opts
-        .values_of("command")
-        .unwrap()
-        .map(|v| v.to_string())
-        .collect();
-
-    let (head, args) = command_parts.split_at(1);
-    let cmd_path = head.first().unwrap();
-
-    print!("\x1b[?25l");
-    clear_display(height);
-    let cooked = uncook_tty(tty.as_raw_fd());
-
-    let mut rresult = Ok(());
-    let mut result_ok = true;
-    let mut start = 0;
-    while result_ok {
-        let (selection, id) = select_loop(&mut tty, start, height, width, &lines);
-        rresult = match selection {
-            Some(val) => {
-                match Command::new(cmd_path)
-                    .args(args)
-                    .arg(val)
-                    .status()
-                    .unwrap()
-                    .code()
-                {
-                    None => Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "command killed by signal",
-                    )), // the command was killed by a signal,
-                    Some(code) => match code {
-                        0 => Ok(()),
-                        _ => Err(io::Error::from_raw_os_error(code)),
-                    },
+    loop {
+        if select_loop(&mut stdin, &mut list) {
+            match cmd.exec(&list.selected()) {
+                None => exit(1),
+                Some(code) => {
+                    if code != 0 {
+                        exit(code);
+                    }
                 }
-            }
-            None => Err(io::Error::new(io::ErrorKind::Other, "nothing selected")),
-        };
+            };
 
-        match rresult {
-            Ok(_) => {
-                start = id.unwrap();
+            if !opts.is_present("multi") {
+                break;
             }
-            Err(_) => {
-                result_ok = false;
-            }
+        } else {
+            break;
         }
     }
 
-    term::tcsetattr(tty.as_raw_fd(), term::TCSANOW, &cooked).unwrap();
-    clear_display(height);
-
-    print!("\x1b[?25h\x1b[1A\x1b[K");
-    return rresult;
+    term::tcsetattr(stdin.as_raw_fd(), term::TCSANOW, &cooked).unwrap();
+    win.clear();
+    win.cnorm();
+    print!("\x1b[1A\x1b[K");
 }
